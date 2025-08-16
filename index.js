@@ -43,12 +43,27 @@ console.log('🤖 Bot de Telegram iniciado correctamente');
 })();
 
 // Base de API del frontend (para endpoints Next.js)
-const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:9002';
+// Para desarrollo con Telegram: usar Serveo por defecto (HTTPS requerido)
+// Para desarrollo local: usar localhost
+const API_BASE_URL = process.env.API_BASE_URL || 'https://finanzaspersonales.serveo.net';
+
+console.log('🔗 Bot configurado para usar API en:', API_BASE_URL);
 
 // Helper para construir display name
 function buildDisplayName(from) {
   const parts = [from.first_name, from.last_name].filter(Boolean);
-  return parts.length ? parts.join(' ') : (from.username ? `@${from.username}` : 'Usuario');
+  
+  if (parts.length > 0) {
+    return parts.join(' ');
+  }
+  
+  // Si no hay nombre, usar username sin @
+  if (from.username) {
+    return from.username;
+  }
+  
+  // Último recurso: generar nombre descriptivo
+  return `Usuario Telegram ${from.id}`;
 }
 
 // Comando /start con flujo de alta y validación de existencia
@@ -63,11 +78,11 @@ bot.onText(/\/start/, async (msg) => {
 
     if (res.ok && data.exists) {
       // Usuario ya existe
-      const message = `¡Hola ${displayName}! 👋\n\nYa estás dado de alta en Finanzas Libre.`;
+      const message = `¡Hola ${displayName}! 👋\n\n✅ Ya tienes una cuenta activa en Finanzas Libre.\n\n🔗 Puedes acceder a la aplicación web cuando quieras.`;
       await bot.sendMessage(chatId, message, {
         reply_markup: {
           inline_keyboard: [[
-            { text: '🔐 Obtener enlace de acceso', callback_data: 'login_link' }
+            { text: '🔑 Acceder a la app', callback_data: 'login_link' }
           ]]
         }
       });
@@ -95,8 +110,10 @@ bot.onText(/\/help/, (msg) => {
   
   const helpMessage = `📋 Comandos disponibles:
 
-/start - Mensaje de bienvenida
+/start - Mensaje de bienvenida y acceso
 /help - Mostrar esta ayuda
+/cuenta - Verificar estado de tu cuenta
+/actualizar - Actualizar tu perfil
 /info - Información del bot
 /ping - Verificar estado del bot
 /analizar [descripción] - Analizar un movimiento financiero
@@ -115,6 +132,75 @@ El bot te dirá si es ingreso o egreso y la categoría correspondiente.`;
   bot.sendMessage(chatId, helpMessage);
 });
 
+// Comando /cuenta - Verificar estado de la cuenta
+bot.onText(/\/cuenta/, async (msg) => {
+  const chatId = msg.chat.id;
+  const telegramId = String(msg.from.id);
+  const displayName = buildDisplayName(msg.from);
+  
+  console.log('🔍 Verificando cuenta para:', { telegramId, displayName });
+
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/bot/users/exists?telegramId=${telegramId}`);
+    const data = await res.json().catch(() => ({}));
+
+    if (res.ok && data.exists) {
+      const user = data.user;
+      const message = `👤 Estado de tu cuenta\n\n✅ Activa y registrada\n\n📋 Información:\n• Nombre: ${user.displayName}\n• Usuario: ${user.username || 'No configurado'}\n• ID Telegram: ${user.telegramId}\n• Estado: ${user.isActive ? '🟢 Activa' : '🔴 Inactiva'}\n\n🔗 Puedes acceder a la app cuando quieras usando /start`;
+      
+      await bot.sendMessage(chatId, message, {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '🔑 Acceder a la app', callback_data: 'login_link' }
+          ]]
+        }
+      });
+    } else {
+      const message = `👤 Estado de tu cuenta\n\n❌ No registrada\n\n¡Hola ${displayName}! Aún no tienes una cuenta en Finanzas Libre.\n\n💡 Usa /start para crear tu cuenta.`;
+      
+      await bot.sendMessage(chatId, message, {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '✅ Crear cuenta ahora', callback_data: 'register_yes' }
+          ]]
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error verificando cuenta:', error);
+    await bot.sendMessage(chatId, '❌ Error al verificar tu cuenta. Intenta nuevamente.');
+  }
+});
+
+// Comando /actualizar - Actualizar perfil del usuario
+bot.onText(/\/actualizar/, async (msg) => {
+  const chatId = msg.chat.id;
+  const telegramId = String(msg.from.id);
+  const displayName = buildDisplayName(msg.from);
+  const username = msg.from.username ? `@${msg.from.username}` : '';
+
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/auth/update-profile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ telegramId, username, displayName }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const message = `✅ Perfil actualizado correctamente\n\n📋 Información actualizada:\n• Nombre: ${data.user.displayName}\n• Usuario: ${data.user.username || 'No configurado'}\n\n💡 Si tienes configurado un nombre en tu perfil de Telegram, se usará automáticamente.`;
+      
+      await bot.sendMessage(chatId, message);
+    } else {
+      const errorData = await res.json().catch(() => ({}));
+      await bot.sendMessage(chatId, `❌ Error al actualizar perfil: ${errorData.error || 'Error desconocido'}`);
+    }
+  } catch (error) {
+    console.error('Error actualizando perfil:', error);
+    await bot.sendMessage(chatId, '❌ Error al actualizar tu perfil. Intenta nuevamente.');
+  }
+});
+
 // Manejo de alta (inline keyboard)
 bot.on('callback_query', async (query) => {
   try {
@@ -129,11 +215,15 @@ bot.on('callback_query', async (query) => {
     }
 
     if (data === 'register_yes' || data === 'login_link') {
-      await bot.answerCallbackQuery(query.id, { text: 'Procesando tu alta…' });
+      const isRegistration = data === 'register_yes';
+      const callbackText = isRegistration ? 'Procesando tu alta…' : 'Generando enlace de acceso…';
+      await bot.answerCallbackQuery(query.id, { text: callbackText });
 
       const telegramId = String(from.id);
       const username = from.username ? `@${from.username}` : '';
       const displayName = buildDisplayName(from);
+      
+      console.log('📊 Datos del usuario:', { telegramId, username, displayName });
 
       // Crear/actualizar usuario y generar URL de login temporal
       const res = await fetch(`${API_BASE_URL}/api/auth/telegram/generate-token`, {
@@ -148,17 +238,21 @@ bot.on('callback_query', async (query) => {
         return;
       }
 
-      const data = await res.json();
-      const loginUrl = data.loginUrl;
+      const responseData = await res.json();
+      const loginUrl = responseData.loginUrl;
       console.log(loginUrl);
-      const expiresAt = data.expiresAt ? new Date(data.expiresAt).toLocaleString('es-ES') : null;
+      const expiresAt = responseData.expiresAt ? new Date(responseData.expiresAt).toLocaleString('es-ES') : null;
 
-      const text = `✅ ¡Listo, ${displayName}!\n\nTu cuenta ha sido creada/actualizada y ya puedes acceder a la app web.${expiresAt ? `\n\n⏰ Este enlace expira: ${expiresAt}` : ''}`;
+      const text = isRegistration 
+        ? `✅ ¡Bienvenido, ${displayName}!\n\n🎉 Tu cuenta ha sido creada exitosamente.\n\n🔗 Haz clic en el botón para acceder a la aplicación web.${expiresAt ? `\n\n⏰ Este enlace expira: ${expiresAt}` : ''}`
+        : `✅ ¡Perfecto, ${displayName}!\n\n🔗 Tu enlace de acceso está listo.${expiresAt ? `\n\n⏰ Este enlace expira: ${expiresAt}` : ''}`;
+
+      const buttonText = isRegistration ? '🚀 Acceder por primera vez' : '🔑 Acceder a la app';
 
       await bot.sendMessage(chatId, text, {
         reply_markup: {
           inline_keyboard: [[
-            { text: '🔑 Abrir acceso', url: loginUrl }
+            { text: buttonText, url: loginUrl }
           ]]
         }
       });
